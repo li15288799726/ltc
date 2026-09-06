@@ -1,0 +1,844 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gate.io LTC 5000W 双向对冲做市系统 (Dual Mode Pro)</title>
+    <style>
+        :root {
+            --bg-main: #0B0E14;
+            --bg-card: #151A23;
+            --bg-subcard: #1C2331;
+            --text-main: #E2E8F0;
+            --text-sub: #94A3B8;
+            --border-color: #2D3748;
+            --accent-green: #10B981;
+            --accent-red: #EF4444;
+            --accent-blue: #3B82F6;
+            --accent-yellow: #F59E0B;
+            --accent-purple: #8B5CF6;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+        }
+
+        body {
+            background-color: var(--bg-main);
+            color: var(--text-main);
+            padding: 20px;
+            font-size: 14px;
+        }
+
+        .container {
+            max-width: 1440px;
+            margin: 0 auto;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background-color: var(--bg-card);
+            border: 1px solid var(--border-color);
+            padding: 14px 20px;
+            border-radius: 10px;
+        }
+
+        .brand {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .brand h1 {
+            font-size: 18px;
+            font-weight: 700;
+            color: #fff;
+            letter-spacing: 0.5px;
+        }
+
+        .badge {
+            background-color: var(--bg-subcard);
+            border: 1px solid var(--border-color);
+            padding: 4px 10px;
+            border-radius: 6px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+
+        .header-actions {
+            display: flex;
+            gap: 10px;
+        }
+
+        button {
+            padding: 8px 16px;
+            border-radius: 6px;
+            border: none;
+            cursor: pointer;
+            font-weight: 600;
+            font-size: 13px;
+            transition: opacity 0.2s;
+        }
+
+        button:hover {
+            opacity: 0.85;
+        }
+
+        .btn-start { background-color: var(--accent-green); color: #fff; }
+        .btn-stop { background-color: var(--accent-yellow); color: #000; }
+        .btn-cancel { background-color: var(--accent-red); color: #fff; }
+        .btn-reset { background-color: #475569; color: #fff; }
+        .btn-save { background-color: var(--accent-blue); color: #fff; width: 100%; margin-top: 10px; }
+
+        .status-badge {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-weight: 600;
+            padding: 6px 14px;
+            border-radius: 20px;
+            font-size: 12px;
+        }
+
+        .status-running {
+            background-color: rgba(16, 185, 129, 0.15);
+            color: var(--accent-green);
+            border: 1px solid var(--accent-green);
+        }
+
+        .status-stopped {
+            background-color: rgba(239, 68, 68, 0.15);
+            color: var(--accent-red);
+            border: 1px solid var(--accent-red);
+        }
+
+        .pulse-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background-color: currentColor;
+            animation: pulse 1.5s infinite;
+        }
+
+        @keyframes pulse {
+            0% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.4; transform: scale(1.2); }
+            100% { opacity: 1; transform: scale(1); }
+        }
+
+        .progress-card {
+            background: linear-gradient(135deg, #151A23 0%, #1E293B 100%);
+            border: 1px solid #334155;
+            border-radius: 10px;
+            padding: 16px 20px;
+        }
+
+        .progress-title-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+
+        .progress-title-row .label {
+            font-size: 14px;
+            color: var(--text-sub);
+            font-weight: 600;
+        }
+
+        .progress-title-row .value {
+            font-size: 20px;
+            font-weight: 700;
+            color: var(--accent-blue);
+        }
+
+        .progress-bar-bg {
+            background-color: #0F172A;
+            border-radius: 8px;
+            height: 12px;
+            overflow: hidden;
+            border: 1px solid #1E293B;
+            margin-bottom: 8px;
+        }
+
+        .progress-bar-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #3B82F6 0%, #10B981 100%);
+            width: 0%;
+            transition: width 0.4s ease;
+        }
+
+        .progress-sub {
+            display: flex;
+            justify-content: space-between;
+            font-size: 12px;
+            color: var(--text-sub);
+        }
+
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 16px;
+        }
+
+        .metric-card {
+            background-color: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 10px;
+            padding: 16px;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+        }
+
+        .metric-title {
+            font-size: 12px;
+            color: var(--text-sub);
+            font-weight: 600;
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 8px;
+        }
+
+        .metric-value {
+            font-size: 20px;
+            font-weight: 700;
+            margin-bottom: 8px;
+        }
+
+        .metric-foot {
+            font-size: 12px;
+            color: var(--text-sub);
+            display: flex;
+            justify-content: space-between;
+            border-top: 1px dashed #242D3D;
+            padding-top: 6px;
+        }
+
+        .dual-pos-box {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            background: var(--bg-subcard);
+            padding: 8px 10px;
+            border-radius: 6px;
+            margin-bottom: 6px;
+        }
+
+        .dual-pos-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 12px;
+        }
+
+        .workspace-grid {
+            display: grid;
+            grid-template-columns: 2fr 1fr;
+            gap: 16px;
+        }
+
+        .panel {
+            background-color: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 10px;
+            padding: 16px;
+        }
+
+        .panel-title {
+            font-size: 14px;
+            font-weight: 600;
+            margin-bottom: 12px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .quote-radar-4col {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+            margin-bottom: 12px;
+        }
+
+        .quote-channel-col {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .quote-box {
+            background-color: var(--bg-subcard);
+            border-radius: 8px;
+            padding: 12px 14px;
+            border: 1px solid var(--border-color);
+        }
+
+        .quote-box.bid-channel {
+            border-left: 4px solid var(--accent-green);
+        }
+
+        .quote-box.ask-channel {
+            border-left: 4px solid var(--accent-red);
+        }
+
+        .quote-box-title {
+            display: flex;
+            justify-content: space-between;
+            font-size: 12px;
+            color: var(--text-sub);
+            margin-bottom: 4px;
+        }
+
+        .quote-price {
+            font-size: 18px;
+            font-weight: 700;
+            letter-spacing: 0.5px;
+        }
+
+        .quote-price.bid { color: var(--accent-green); }
+        .quote-price.ask { color: var(--accent-red); }
+
+        .spread-banner {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: #111827;
+            padding: 10px 14px;
+            border-radius: 6px;
+            border: 1px solid #1F2937;
+            font-size: 13px;
+        }
+
+        .spread-highlight {
+            color: var(--accent-yellow);
+            font-weight: 700;
+        }
+
+        .form-row {
+            margin-bottom: 10px;
+        }
+
+        .form-row label {
+            display: block;
+            font-size: 12px;
+            color: var(--text-sub);
+            margin-bottom: 4px;
+        }
+
+        .form-row input {
+            width: 100%;
+            background-color: var(--bg-subcard);
+            border: 1px solid var(--border-color);
+            color: #fff;
+            padding: 8px 10px;
+            border-radius: 6px;
+            font-size: 13px;
+        }
+
+        .form-row input:focus {
+            outline: none;
+            border-color: var(--accent-blue);
+        }
+
+        .logs-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16px;
+        }
+
+        .scroll-list {
+            height: 280px;
+            overflow-y: auto;
+            background-color: var(--bg-subcard);
+            border-radius: 6px;
+            padding: 8px 12px;
+            border: 1px solid var(--border-color);
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        .trade-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 12px;
+            padding: 6px 0;
+            border-bottom: 1px solid #232B3A;
+        }
+
+        .log-item {
+            font-family: monospace;
+            font-size: 11px;
+            color: var(--text-sub);
+            line-height: 1.4;
+            padding: 2px 0;
+        }
+
+        .log-item.info { color: #CBD5E1; }
+        .log-item.warn { color: var(--accent-yellow); }
+        .log-item.error { color: var(--accent-red); font-weight: 700; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <div class="header">
+        <div class="brand">
+            <h1>GATE.IO 永续做市高频终端</h1>
+            <span class="badge" id="contractLabel">LTC_USDT 永续</span>
+            <span class="badge" style="color:var(--accent-green); border-color:var(--accent-green);">双向常驻对冲 (Dual Mode)</span>
+            <span class="badge" style="color:var(--accent-yellow)">1张 = 0.1 LTC</span>
+        </div>
+        <div style="display:flex; align-items:center; gap: 16px;">
+            <div id="statusBadge" class="status-badge status-stopped">
+                <span class="pulse-dot"></span>
+                <span id="statusText">已暂停做市</span>
+            </div>
+            <div class="header-actions">
+                <button class="btn-start" onclick="startMM()">▶ 启动双向做市</button>
+                <button class="btn-stop" onclick="stopMM()">⏸ 暂停挂单</button>
+                <button class="btn-cancel" onclick="emergencyCancel()">🚨 紧急全撤</button>
+                <button class="btn-reset" onclick="resetStats()">🧹 重置统计</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="progress-card">
+        <div class="progress-title-row">
+            <div>
+                <div class="label">Gate.io 做市商资格冲刺进度 (30日 50,000,000 USDT 流水目标)</div>
+                <div style="font-size: 13px; color: var(--accent-green); margin-top: 4px;">
+                    ✦ 纯双边 Post-Only 挂单 | 严格锁定 2-Tick 价差 | 75% 佣金自动返还
+                </div>
+            </div>
+            <div class="value"><span id="progressPct">0.0000</span>%</div>
+        </div>
+        <div class="progress-bar-bg">
+            <div id="progressBar" class="progress-bar-fill"></div>
+        </div>
+        <div class="progress-sub">
+            <span>累计已完成: <strong id="totalVolume" style="color:#fff;">0.00</strong> USDT</span>
+            <span>距 5000W 目标还剩: <strong id="remainVolume" style="color:var(--accent-blue);">50,000,000.00</strong> USDT</span>
+            <span>Maker 占比: <strong id="makerRatio" style="color:var(--accent-green);">100%</strong></span>
+        </div>
+    </div>
+
+    <div class="metrics-grid">
+        <div class="metric-card">
+            <div class="metric-title">
+                <span>合约可用资金</span>
+                <span style="color:var(--accent-blue)">USDT</span>
+            </div>
+            <div class="metric-value" id="availUsdt">0.00</div>
+            <div class="metric-foot">
+                <span>账户总资产: <strong id="totalUsdt">0.00</strong></span>
+                <span>全仓杠杆: <strong id="leverage">10x</strong></span>
+            </div>
+        </div>
+
+        <div class="metric-card">
+            <div class="metric-title">
+                <span>双向常驻持仓 (Dual Mode)</span>
+                <span id="hedgeStatusBadge" class="badge" style="background:#059669;color:#fff;font-size:10px;">完全对冲</span>
+            </div>
+            <div class="dual-pos-box">
+                <div class="dual-pos-row">
+                    <span style="color:var(--accent-green);font-weight:700;">▲ 多头 (Long):</span>
+                    <strong id="longPosDisplay" style="color:var(--accent-green);">0 张 (0.0 LTC)</strong>
+                </div>
+                <div class="dual-pos-row" style="color:var(--text-sub); font-size:11px;">
+                    <span>开仓均价: <span id="longEntryPrice">0.00</span></span>
+                    <span>未结: <span id="longUnrealPnl" style="color:var(--accent-green)">0.00</span> U</span>
+                </div>
+            </div>
+            <div class="dual-pos-box" style="margin-bottom:0;">
+                <div class="dual-pos-row">
+                    <span style="color:var(--accent-red);font-weight:700;">▼ 空头 (Short):</span>
+                    <strong id="shortPosDisplay" style="color:var(--accent-red);">0 张 (0.0 LTC)</strong>
+                </div>
+                <div class="dual-pos-row" style="color:var(--text-sub); font-size:11px;">
+                    <span>开仓均价: <span id="shortEntryPrice">0.00</span></span>
+                    <span>未结: <span id="shortUnrealPnl" style="color:var(--accent-red)">0.00</span> U</span>
+                </div>
+            </div>
+            <div class="metric-foot" style="margin-top:6px;">
+                <span>净敞口: <strong id="netPosDisplay">0 张 (0.0 LTC)</strong></span>
+                <span>净未结: <strong id="totalUnrealPnl">0.00 U</strong></span>
+            </div>
+        </div>
+
+        <div class="metric-card">
+            <div class="metric-title">
+                <span>75% 返佣预估收益</span>
+                <span style="color:var(--accent-green)">REBATE</span>
+            </div>
+            <div class="metric-value" style="color:var(--accent-green);" id="rebateUsdt">+0.00 U</div>
+            <div class="metric-foot">
+                <span>名义手续费扣减:</span>
+                <span id="nominalFees" style="color:var(--accent-red)">-0.00 U</span>
+            </div>
+        </div>
+
+        <div class="metric-card">
+            <div class="metric-title">
+                <span>做市总净盈亏 (含返佣)</span>
+                <span style="color:var(--accent-yellow)">NET PNL</span>
+            </div>
+            <div class="metric-value" id="netPnl" style="color:var(--accent-green);">+0.00 U</div>
+            <div class="metric-foot">
+                <span>价差毛收益: <strong id="grossProfit">0.00 U</strong></span>
+                <span>笔数: <strong id="totalTrades">0</strong></span>
+            </div>
+        </div>
+    </div>
+
+    <div class="workspace-grid">
+        <div class="panel">
+            <div class="panel-title">
+                <span>⚡ 4 通道双向做市挂单雷达 (Maker POC 连续排队)</span>
+                <span style="font-size:12px; color:var(--text-sub);" id="lastRefresh">更新中...</span>
+            </div>
+            
+            <div class="quote-radar-4col">
+                <div class="quote-channel-col">
+                    <div class="quote-box bid-channel">
+                        <div class="quote-box-title">
+                            <span>【买一档 · 盘口优先】平空止盈 (reduce_only=True)</span>
+                            <span id="closeShortStatus" style="color:var(--accent-green)">--</span>
+                        </div>
+                        <div class="quote-price bid" id="closeShortPrice">--</div>
+                        <div style="font-size:11px; color:var(--text-sub); margin-top:3px;">
+                            数量: <span id="closeShortSize" style="color:#fff">--</span> 张 | 盘口买一: <span id="bestBid">--</span>
+                        </div>
+                    </div>
+
+                    <div class="quote-box bid-channel">
+                        <div class="quote-box-title">
+                            <span>【买二档 · 深度高抛低吸】开多做市 (reduce_only=False)</span>
+                            <span id="openLongStatus" style="color:var(--accent-green)">--</span>
+                        </div>
+                        <div class="quote-price bid" id="openLongPrice">--</div>
+                        <div style="font-size:11px; color:var(--text-sub); margin-top:3px;">
+                            数量: <span id="openLongSize" style="color:#fff">--</span> 张 | 独立价位 · 净敞口风控
+                        </div>
+                    </div>
+                </div>
+
+                <div class="quote-channel-col">
+                    <div class="quote-box ask-channel">
+                        <div class="quote-box-title">
+                            <span>【卖一档 · 盘口优先】平多止盈 (reduce_only=True)</span>
+                            <span id="closeLongStatus" style="color:var(--accent-red)">--</span>
+                        </div>
+                        <div class="quote-price ask" id="closeLongPrice">--</div>
+                        <div style="font-size:11px; color:var(--text-sub); margin-top:3px;">
+                            数量: <span id="closeLongSize" style="color:#fff">--</span> 张 | 盘口卖一: <span id="bestAsk">--</span>
+                        </div>
+                    </div>
+
+                    <div class="quote-box ask-channel">
+                        <div class="quote-box-title">
+                            <span>【卖二档 · 深度高抛低吸】开空做市 (reduce_only=False)</span>
+                            <span id="openShortStatus" style="color:var(--accent-red)">--</span>
+                        </div>
+                        <div class="quote-price ask" id="openShortPrice">--</div>
+                        <div style="font-size:11px; color:var(--text-sub); margin-top:3px;">
+                            数量: <span id="openShortSize" style="color:#fff">--</span> 张 | 独立价位 · 净敞口风控
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="spread-banner">
+                <div>
+                    当前市场盘口价差: <strong id="marketSpread">0.01 U</strong> (<span id="marketSpreadTicks">1</span> Ticks)
+                </div>
+                <div>
+                    做市双向锁定利差: <span class="spread-highlight" id="activeSpreadTicks">2 Ticks (+0.02 U)</span> 
+                    <span style="font-size:11px; color:var(--accent-green); margin-left:6px;">[高频免损刷量引擎]</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="panel">
+            <div class="panel-title">
+                <span>⚙️ 做市与风控参数热更新</span>
+                <span style="font-size:11px; color:var(--accent-blue)">即时生效</span>
+            </div>
+            <div class="form-row">
+                <label>单边挂单张数 (1张 = 0.1 LTC ≈ 5.4U):</label>
+                <input type="number" id="inputOrderSize" min="1" max="500" value="10">
+            </div>
+            <div class="form-row">
+                <label>目标利差 Ticks (1 tick = 0.01):</label>
+                <input type="number" id="inputSpreadTicks" min="2" max="10" value="2">
+            </div>
+            <div class="form-row">
+                <label>单边最大持仓上限 (张数):</label>
+                <input type="number" id="inputMaxInv" min="5" max="200" value="30">
+            </div>
+            <div class="form-row">
+                <label>净敞口风控上限 (|多仓 - 空仓| <= 张数):</label>
+                <input type="number" id="inputMaxNet" min="5" max="100" value="20">
+            </div>
+            <button class="btn-save" onclick="saveParams()">💾 确认并应用新参数</button>
+        </div>
+    </div>
+
+    <div class="logs-grid">
+        <div class="panel">
+            <div class="panel-title">
+                <span>📋 最近成交明细 (Trades)</span>
+                <span style="font-size:12px; color:var(--text-sub);">实时计入 5000W 流水</span>
+            </div>
+            <div class="scroll-list" id="tradesList">
+                <div style="text-align:center; color:var(--text-sub); font-size:12px; padding:20px;">暂无成交记录</div>
+            </div>
+        </div>
+
+        <div class="panel">
+            <div class="panel-title">
+                <span>🖥️ 系统高频审计日志 (Audit Log)</span>
+                <span style="font-size:12px; color:var(--text-sub);">毫秒级调度监控</span>
+            </div>
+            <div class="scroll-list" id="auditLogs">
+                <div style="text-align:center; color:var(--text-sub); font-size:12px; padding:20px;">加载中...</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    async function fetchStatus() {
+        try {
+            const res = await fetch('/api/status');
+            const data = await res.json();
+            updateUI(data);
+        } catch (e) {
+            console.error('Fetch status error:', e);
+        }
+    }
+
+    function updateUI(data) {
+        const isRunning = data.is_running;
+        const statusBadge = document.getElementById('statusBadge');
+        const statusText = document.getElementById('statusText');
+        if (isRunning) {
+            statusBadge.className = 'status-badge status-running';
+            statusText.innerText = '正在双向连续做市中';
+        } else {
+            statusBadge.className = 'status-badge status-stopped';
+            statusText.innerText = '已暂停做市';
+        }
+
+        const stats = data.stats;
+
+        if (!window.paramsInitialized && data.config) {
+            document.getElementById('inputOrderSize').value = data.config.order_size_contracts || 10;
+            document.getElementById('inputSpreadTicks').value = data.config.target_spread_ticks || 2;
+            document.getElementById('inputMaxInv').value = data.config.max_inventory_contracts || 30;
+            document.getElementById('inputMaxNet').value = data.config.max_net_inventory || 20;
+            window.paramsInitialized = true;
+        }
+
+        const progressPct = stats.progress_pct || 0;
+        document.getElementById('progressPct').innerText = progressPct.toFixed(4);
+        document.getElementById('progressBar').style.width = Math.min(100, progressPct) + '%';
+        document.getElementById('totalVolume').innerText = stats.total_volume_usdt.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2});
+        const remain = Math.max(0, stats.target_volume_usdt - stats.total_volume_usdt);
+        document.getElementById('remainVolume').innerText = remain.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2});
+        document.getElementById('makerRatio').innerText = stats.maker_ratio + '%';
+
+        const acc = data.account_data;
+        document.getElementById('availUsdt').innerText = acc.available_usdt.toFixed(2);
+        document.getElementById('totalUsdt').innerText = acc.total_usdt.toFixed(2);
+        document.getElementById('leverage').innerText = (acc.leverage || 10) + 'x';
+
+        const lSize = acc.long_size || 0;
+        const sSize = acc.short_size || 0;
+        const lLtc = (acc.long_ltc !== undefined) ? acc.long_ltc : (lSize * 0.1).toFixed(2);
+        const sLtc = (acc.short_ltc !== undefined) ? acc.short_ltc : (sSize * 0.1).toFixed(2);
+        const netSize = lSize - sSize;
+        const netLtc = (netSize * 0.1).toFixed(2);
+
+        document.getElementById('longPosDisplay').innerText = '+' + lSize + ' 张 (' + lLtc + ' LTC)';
+        document.getElementById('longEntryPrice').innerText = (acc.long_entry_price || 0).toFixed(2);
+        const lPnl = acc.long_unreal_pnl || 0;
+        document.getElementById('longUnrealPnl').innerText = (lPnl >= 0 ? '+' : '') + lPnl.toFixed(2);
+        document.getElementById('longUnrealPnl').style.color = lPnl >= 0 ? 'var(--accent-green)' : 'var(--accent-red)';
+
+        document.getElementById('shortPosDisplay').innerText = '-' + sSize + ' 张 (-' + sLtc + ' LTC)';
+        document.getElementById('shortEntryPrice').innerText = (acc.short_entry_price || 0).toFixed(2);
+        const sPnl = acc.short_unreal_pnl || 0;
+        document.getElementById('shortUnrealPnl').innerText = (sPnl >= 0 ? '+' : '') + sPnl.toFixed(2);
+        document.getElementById('shortUnrealPnl').style.color = sPnl >= 0 ? 'var(--accent-green)' : 'var(--accent-red)';
+
+        document.getElementById('netPosDisplay').innerText = (netSize >= 0 ? '+' : '') + netSize + ' 张 (' + netLtc + ' LTC)';
+        const totPnl = acc.total_unrealised_pnl || 0;
+        document.getElementById('totalUnrealPnl').innerText = (totPnl >= 0 ? '+' : '') + totPnl.toFixed(2) + ' U';
+
+        const hedgeBadge = document.getElementById('hedgeStatusBadge');
+        if (Math.abs(netSize) === 0 && lSize > 0) {
+            hedgeBadge.innerText = '🛡️ 完全对冲 (Delta=0)';
+            hedgeBadge.style.background = '#059669';
+        } else if (Math.abs(netSize) <= 10) {
+            hedgeBadge.innerText = '微量敞口 (' + (netSize > 0 ? '+' : '') + netSize + ')';
+            hedgeBadge.style.background = '#2563EB';
+        } else {
+            hedgeBadge.innerText = '净敞口预警 (' + (netSize > 0 ? '+' : '') + netSize + ')';
+            hedgeBadge.style.background = '#DC2626';
+        }
+
+        document.getElementById('rebateUsdt').innerText = '+' + stats.rebate_usdt.toFixed(2) + ' U';
+        document.getElementById('nominalFees').innerText = '-' + stats.nominal_fees_usdt.toFixed(2) + ' U';
+        document.getElementById('netPnl').innerText = (stats.net_pnl_usdt >= 0 ? '+' : '') + stats.net_pnl_usdt.toFixed(2) + ' U';
+        const lTrades = stats.long_trades || 0;
+        const sTrades = stats.short_trades || 0;
+        document.getElementById('totalTrades').innerText = stats.total_trades + ' (多' + lTrades + ' / 空' + sTrades + ')';
+
+        const mkt = data.market_data;
+        document.getElementById('bestBid').innerText = (mkt.best_bid || 0).toFixed(2);
+        document.getElementById('bestAsk').innerText = (mkt.best_ask || 0).toFixed(2);
+        document.getElementById('marketSpread').innerText = (mkt.spread_usdt || 0.01).toFixed(2) + ' U';
+        document.getElementById('marketSpreadTicks').innerText = mkt.spread_ticks || 1;
+        document.getElementById('lastRefresh').innerText = new Date().toLocaleTimeString();
+
+        const quotes = data.active_quotes || {};
+
+        const qCloseShort = quotes['t-mm-closeshort'];
+        if (qCloseShort) {
+            document.getElementById('closeShortPrice').innerText = qCloseShort.price.toFixed(2);
+            document.getElementById('closeShortSize').innerText = qCloseShort.size;
+            document.getElementById('closeShortStatus').innerText = '挂单中 (Maker)';
+        } else {
+            document.getElementById('closeShortPrice').innerText = '--';
+            document.getElementById('closeShortSize').innerText = '--';
+            document.getElementById('closeShortStatus').innerText = (sSize > 0) ? '等待重挂' : '无空仓平仓';
+        }
+
+        const qOpenLong = quotes['t-mm-openlong'];
+        if (qOpenLong) {
+            document.getElementById('openLongPrice').innerText = qOpenLong.price.toFixed(2);
+            document.getElementById('openLongSize').innerText = qOpenLong.size;
+            document.getElementById('openLongStatus').innerText = '挂单中 (Maker)';
+        } else {
+            document.getElementById('openLongPrice').innerText = '--';
+            document.getElementById('openLongSize').innerText = '--';
+            document.getElementById('openLongStatus').innerText = isRunning ? '敞口风控限额' : '未挂单';
+        }
+
+        const qCloseLong = quotes['t-mm-closelong'];
+        if (qCloseLong) {
+            document.getElementById('closeLongPrice').innerText = qCloseLong.price.toFixed(2);
+            document.getElementById('closeLongSize').innerText = qCloseLong.size;
+            document.getElementById('closeLongStatus').innerText = '挂单中 (Maker)';
+        } else {
+            document.getElementById('closeLongPrice').innerText = '--';
+            document.getElementById('closeLongSize').innerText = '--';
+            document.getElementById('closeLongStatus').innerText = (lSize > 0) ? '等待重挂' : '无多仓平仓';
+        }
+
+        const qOpenShort = quotes['t-mm-openshort'];
+        if (qOpenShort) {
+            document.getElementById('openShortPrice').innerText = qOpenShort.price.toFixed(2);
+            document.getElementById('openShortSize').innerText = qOpenShort.size;
+            document.getElementById('openShortStatus').innerText = '挂单中 (Maker)';
+        } else {
+            document.getElementById('openShortPrice').innerText = '--';
+            document.getElementById('openShortSize').innerText = '--';
+            document.getElementById('openShortStatus').innerText = isRunning ? '敞口风控限额' : '未挂单';
+        }
+
+        const activeBidP = (qCloseShort && qCloseShort.price) || (qOpenLong && qOpenLong.price) || mkt.best_bid;
+        const activeAskP = (qCloseLong && qCloseLong.price) || (qOpenShort && qOpenShort.price) || mkt.best_ask;
+        if (activeBidP && activeAskP) {
+            const spreadTicks = Math.round((activeAskP - activeBidP) / 0.01);
+            document.getElementById('activeSpreadTicks').innerText = spreadTicks + ' Ticks (+' + (activeAskP - activeBidP).toFixed(2) + ' U)';
+        }
+
+        const tradesList = document.getElementById('tradesList');
+        if (data.recent_trades && data.recent_trades.length > 0) {
+            tradesList.innerHTML = data.recent_trades.map(function(t) {
+                var isBuy = t.side === 'BUY';
+                var actionLabel = t.action || (isBuy ? '买入' : '卖出');
+                var actionColor = actionLabel.indexOf('多') !== -1 ? 'var(--accent-green)' : 'var(--accent-red)';
+                return '<div class="trade-item">' +
+                    '<span style="color:var(--text-sub);">' + t.time + '</span>' +
+                    '<strong style="color:' + actionColor + '; background:rgba(255,255,255,0.06); padding:2px 6px; border-radius:4px;">' + actionLabel + '</strong>' +
+                    '<span style="color:' + (isBuy ? 'var(--accent-green)' : 'var(--accent-red)') + '">' + t.side + '</span>' +
+                    '<span>' + t.size_contracts + '张 (' + t.size_ltc + ' LTC)</span>' +
+                    '<span>@ ' + t.price + '</span>' +
+                    '<span style="color:var(--accent-blue)">流水: ' + t.volume_usdt + ' U</span>' +
+                    '<span class="badge" style="font-size:10px;">' + t.role.toUpperCase() + '</span>' +
+                '</div>';
+            }).join('');
+        }
+
+        const auditLogs = document.getElementById('auditLogs');
+        if (data.audit_logs && data.audit_logs.length > 0) {
+            auditLogs.innerHTML = data.audit_logs.map(function(l) {
+                return '<div class="log-item ' + l.level.toLowerCase() + '">' +
+                    '[' + l.time + '] [' + l.level + '] ' + l.msg +
+                '</div>';
+            }).join('');
+        }
+    }
+
+    async function startMM() {
+        await fetch('/api/start', { method: 'POST' });
+        fetchStatus();
+    }
+
+    async function stopMM() {
+        await fetch('/api/stop', { method: 'POST' });
+        fetchStatus();
+    }
+
+    async function emergencyCancel() {
+        if (confirm('确定要紧急撤销 LTC_USDT 全部挂单吗？')) {
+            await fetch('/api/emergency_cancel', { method: 'POST' });
+            fetchStatus();
+        }
+    }
+
+    async function resetStats() {
+        if (confirm('确定要重置本次测试的累计流水与统计数据吗？')) {
+            await fetch('/api/reset_stats', { method: 'POST' });
+            fetchStatus();
+        }
+    }
+
+    async function saveParams() {
+        const orderSize = parseInt(document.getElementById('inputOrderSize').value) || 10;
+        const spreadTicks = parseInt(document.getElementById('inputSpreadTicks').value) || 2;
+        const maxInv = parseInt(document.getElementById('inputMaxInv').value) || 30;
+        const maxNet = parseInt(document.getElementById('inputMaxNet').value) || 20;
+        await fetch('/api/update_params', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                order_size_contracts: orderSize,
+                target_spread_ticks: spreadTicks,
+                max_inventory_contracts: maxInv,
+                max_net_inventory: maxNet
+            })
+        });
+        alert('参数已成功更新并在下一轮做市中生效！');
+        fetchStatus();
+    }
+
+    setInterval(fetchStatus, 800);
+    fetchStatus();
+</script>
+</body>
+</html>
