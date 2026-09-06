@@ -13,11 +13,17 @@ import asyncio
 import time
 import logging
 import json
+import os
 from typing import Dict, Any, List, Optional
 from datetime import datetime
+from collections import deque
 import aiohttp
 
 logger = logging.getLogger("MMStrategy")
+
+# 本地状态持久化目录与文件
+_STATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+_STATE_FILE = os.path.join(_STATE_DIR, "strategy_state.json")
 
 class MarketMakerStrategy:
     def __init__(self, client, config: Dict[str, Any]):
@@ -42,6 +48,7 @@ class MarketMakerStrategy:
             "short_trades": 0,           # 空头腿成交计数 (开空/平空)
             "nominal_fees_usdt": 0.0,
             "rebate_usdt": 0.0,
+            "funding_fee_usdt": 0.0,      # 双向持仓累计资金费净支出成本
             "gross_profit_usdt": 0.0,
             "net_pnl_usdt": 0.0,
             "running_time_seconds": 0,
@@ -49,7 +56,7 @@ class MarketMakerStrategy:
             "initial_equity_usdt": 497.32,
         }
         
-        # 市场深度快照
+        # 市场深度快照与微观结构 (Micro-Price / OBI)
         self.market_data = {
             "last_price": 0.0,
             "best_bid": 0.0,
@@ -57,6 +64,11 @@ class MarketMakerStrategy:
             "spread_ticks": 2,
             "spread_usdt": 0.02,
             "mid_price": 0.0,
+            "micro_price": 0.0,          # Stoikov 微观公允价
+            "obi": 0.0,                  # 订单簿失衡度 Order Book Imbalance (-1.0 ~ 1.0)
+            "bid_vol": 0.0,
+            "ask_vol": 0.0,
+            "as_skew_ticks": 0.0,        # Avellaneda-Stoikov 库存偏斜偏移量 (ticks)
             "orderbook_update_time": 0,
             "data_source": "INITIALIZING",
         }
@@ -93,7 +105,12 @@ class MarketMakerStrategy:
         
         self.recent_trades: List[Dict[str, Any]] = []
         self.audit_logs: List[Dict[str, Any]] = []
+        
+        # 成交与资金费去重（有序保留最近2000条）
         self.known_trade_ids = set()
+        self.known_trade_list: List[str] = []
+        self.known_funding_ids = set()
+        self.known_funding_list: List[str] = []
         
         # 离散开仓价位追踪：严格保证“一个价位只开一次仓位”
         self.active_long_prices: List[float] = []
@@ -102,6 +119,57 @@ class MarketMakerStrategy:
         # 活跃持仓计时器（用于超时平水微调）
         self.last_long_trade_time: float = time.time()
         self.last_short_trade_time: float = time.time()
+        
+        # 高频微观价格历史（用于计算短周期波动率）
+        self.recent_mid_prices: deque = deque(maxlen=40)
+        self.last_state_save_time: float = time.time()
+
+        # 启动时恢复持久化状态
+        self._load_state()
+
+    # ==================== 状态持久化机制 (节流写入，保护磁盘与事件循环) ====================
+    def _load_state(self):
+        try:
+            if os.path.exists(_STATE_FILE):
+                with open(_STATE_FILE, "r", encoding="utf-8") as f:
+                    saved = json.load(f)
+                self.stats.update(saved.get("stats", {}))
+                
+                trade_ids = saved.get("known_trade_ids", [])
+                self.known_trade_list = trade_ids[-2000:]
+                self.known_trade_ids = set(self.known_trade_list)
+                
+                funding_ids = saved.get("known_funding_ids", [])
+                self.known_funding_list = funding_ids[-2000:]
+                self.known_funding_ids = set(self.known_funding_list)
+                
+                self.recent_trades = saved.get("recent_trades", [])[:50]
+                self.audit_logs = saved.get("audit_logs", [])[:80]
+                logger.info(f"已从 {_STATE_FILE} 恢复上次运行状态 (累计成交: {len(self.known_trade_ids)} 笔)")
+        except Exception as e:
+            logger.warning(f"恢复持久化状态失败，将以初始状态启动: {e}")
+
+    def _save_state(self, force: bool = False):
+        now = time.time()
+        # 节流机制：非强制保存时，至少间隔 30 秒写入一次，避免高频阻塞事件循环
+        if not force and (now - self.last_state_save_time < 30.0):
+            return
+        try:
+            os.makedirs(_STATE_DIR, exist_ok=True)
+            payload = {
+                "stats": self.stats,
+                "known_trade_ids": self.known_trade_list[-2000:],
+                "known_funding_ids": self.known_funding_list[-2000:],
+                "recent_trades": self.recent_trades[:50],
+                "audit_logs": self.audit_logs[:80],
+            }
+            tmp_path = _STATE_FILE + ".tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False)
+            os.replace(tmp_path, _STATE_FILE)
+            self.last_state_save_time = now
+        except Exception as e:
+            logger.warning(f"持久化状态保存失败: {e}")
 
     def log(self, level: str, msg: str):
         now_str = datetime.now().strftime("%H:%M:%S")
@@ -164,14 +232,32 @@ class MarketMakerStrategy:
                 if bids and asks:
                     best_bid = float(bids[0]['p'])
                     best_ask = float(asks[0]['p'])
+                    bid_sz = float(bids[0].get('s', 0.0))
+                    ask_sz = float(asks[0].get('s', 0.0))
                     spread = max(0.01, best_ask - best_bid)
                     mid_p = (best_bid + best_ask) / 2.0
+                    
+                    # 订单簿失衡度 OBI: (V_bid - V_ask) / (V_bid + V_ask)
+                    obi = (bid_sz - ask_sz) / (bid_sz + ask_sz + 1e-6)
+                    obi = max(-1.0, min(1.0, obi))
+                    
+                    # Stoikov Micro-Price 微观公允价
+                    if self.config.get("enable_micro_price", True):
+                        weight = self.config.get("obi_weight", 0.5)
+                        micro_p = mid_p + (obi * (spread / 2.0) * weight)
+                    else:
+                        micro_p = mid_p
+
                     self.market_data.update({
                         'best_bid': best_bid,
                         'best_ask': best_ask,
                         'spread_usdt': round(spread, 4),
                         'spread_ticks': max(1, int(round(spread / self.config['tick_size']))),
                         'mid_price': round(mid_p, 4),
+                        'micro_price': round(micro_p, 4),
+                        'obi': round(obi, 3),
+                        'bid_vol': bid_sz,
+                        'ask_vol': ask_sz,
                         'last_price': round(mid_p, 2),
                         'orderbook_update_time': time.time(),
                         'data_source': 'REST_INIT'
@@ -193,6 +279,7 @@ class MarketMakerStrategy:
             "short_trades": 0,
             "nominal_fees_usdt": 0.0,
             "rebate_usdt": 0.0,
+            "funding_fee_usdt": 0.0,
             "gross_profit_usdt": 0.0,
             "net_pnl_usdt": 0.0,
             "running_time_seconds": 0,
@@ -201,6 +288,10 @@ class MarketMakerStrategy:
         })
         self.recent_trades.clear()
         self.known_trade_ids.clear()
+        self.known_trade_list.clear()
+        self.known_funding_ids.clear()
+        self.known_funding_list.clear()
+        self._save_state(force=True)
         self.log("INFO", f"🧹 统计数据已重置归零 (基准权益: {curr_total:.2f} USDT)")
 
     async def _ensure_base_inventory(self):
@@ -262,17 +353,27 @@ class MarketMakerStrategy:
         except Exception as e:
             self.log("WARN", f"清理遗留挂单异常: {e}")
 
-        # 2. 单次同步最新盘口与账户
+        # 2. 显式校准合约杠杆与保证金模式 (全仓双向)
+        try:
+            lev_res = await self.client.set_leverage(self.config["contract"], 100, is_cross=True)
+            if isinstance(lev_res, dict) and lev_res.get("error"):
+                self.log("WARN", f"设置杠杆反馈: {lev_res.get('message')}")
+            else:
+                self.log("INFO", "⚡ 交易所全仓杠杆 (cross_leverage_limit=100) 校验就绪")
+        except Exception as e:
+            self.log("WARN", f"设置杠杆异常: {e}")
+
+        # 3. 单次同步最新盘口与账户
         await self._update_market_and_account()
 
-        # 3. 确保双向底仓齐备
+        # 4. 确保双向底仓齐备
         await self._ensure_base_inventory()
         
-        # 4. 启动 WebSocket 毫秒级盘口监听
+        # 5. 启动 WebSocket 毫秒级盘口监听
         self._ws_task = asyncio.create_task(self._ws_orderbook_loop())
-        # 5. 启动账户与双仓状态后台同步
+        # 6. 启动账户与双仓状态后台同步
         self._sync_task = asyncio.create_task(self._account_sync_loop())
-        # 6. 启动主做市巡航控制循环
+        # 7. 启动主做市巡航控制循环
         self._main_task = asyncio.create_task(self._main_loop())
 
     async def stop(self):
@@ -289,7 +390,8 @@ class MarketMakerStrategy:
         for t in [self._main_task, self._ws_task, self._sync_task]:
             if t and not t.done():
                 t.cancel()
-        self.log("INFO", "已安全停止做市服务")
+        self._save_state(force=True)
+        self.log("INFO", "已安全停止做市服务并持久化状态")
 
     async def emergency_cancel(self):
         self.log("WARN", "🚨 触发一键紧急全撤单！")
@@ -303,6 +405,8 @@ class MarketMakerStrategy:
     # ==================== 1. WebSocket 毫秒级行情流 ====================
     async def _ws_orderbook_loop(self):
         ws_url = self.config.get("real_ws_url", "wss://fx-ws.gateio.ws/v4/ws/usdt")
+        backoff = 1.5
+        max_backoff = 30.0
         while self.is_running:
             try:
                 session = await self.client._get_session()
@@ -315,6 +419,7 @@ class MarketMakerStrategy:
                     }
                     await ws.send_str(json.dumps(sub_msg))
                     self.log("INFO", "🔗 WebSocket 真实盘口行情流已建立连接")
+                    backoff = 1.5  # 成功连上后重置退避时间
                     
                     async for msg in ws:
                         if not self.is_running:
@@ -328,15 +433,35 @@ class MarketMakerStrategy:
                                 if bids and asks:
                                     best_bid = float(bids[0]["p"])
                                     best_ask = float(asks[0]["p"])
+                                    bid_sz = float(bids[0].get("s", 0.0))
+                                    ask_sz = float(asks[0].get("s", 0.0))
                                     spread = max(0.01, best_ask - best_bid)
                                     mid_p = (best_bid + best_ask) / 2.0
                                     
+                                    # 订单簿失衡度 OBI: (V_bid - V_ask) / (V_bid + V_ask)
+                                    obi = (bid_sz - ask_sz) / (bid_sz + ask_sz + 1e-6)
+                                    obi = max(-1.0, min(1.0, obi))
+                                    
+                                    # Stoikov Micro-Price 微观公允价
+                                    if self.config.get("enable_micro_price", True):
+                                        weight = self.config.get("obi_weight", 0.5)
+                                        micro_p = mid_p + (obi * (spread / 2.0) * weight)
+                                    else:
+                                        micro_p = mid_p
+                                    
+                                    # 记录最近中继价格用于波动率检测
+                                    self.recent_mid_prices.append((time.time(), mid_p))
+
                                     self.market_data.update({
                                         "best_bid": best_bid,
                                         "best_ask": best_ask,
                                         "spread_usdt": round(spread, 4),
                                         "spread_ticks": max(1, int(round(spread / self.config["tick_size"]))),
                                         "mid_price": round(mid_p, 4),
+                                        "micro_price": round(micro_p, 4),
+                                        "obi": round(obi, 3),
+                                        "bid_vol": bid_sz,
+                                        "ask_vol": ask_sz,
                                         "last_price": round(mid_p, 2),
                                         "orderbook_update_time": time.time(),
                                         "data_source": "WS_REALTIME"
@@ -345,17 +470,19 @@ class MarketMakerStrategy:
                             break
             except Exception as e:
                 if self.is_running:
-                    self.log("WARN", f"WebSocket 断开重连: {e}")
-                    await asyncio.sleep(1.5)
+                    self.log("WARN", f"WebSocket 断开，{backoff:.1f}秒后重连: {e}")
+                    await asyncio.sleep(backoff)
+                    backoff = min(backoff * 2, max_backoff)
 
     # ==================== 2. 全局多空双仓与账户极速同步 ====================
     async def _account_sync_loop(self):
         while self.is_running:
             try:
-                acc_res, pos_res, trades_res = await asyncio.gather(
+                acc_res, pos_res, trades_res, funding_res = await asyncio.gather(
                     self.client.get_account(),
                     self.client.get_position(self.config["contract"]),
                     self.client.get_my_trades(self.config["contract"], limit=30),
+                    self.client.get_funding_history(self.config["contract"], limit=30),
                     return_exceptions=True
                 )
                 
@@ -432,6 +559,7 @@ class MarketMakerStrategy:
                         tr_time = float(tr.get("create_time", 0))
                         if tr_id and tr_id not in self.known_trade_ids:
                             self.known_trade_ids.add(tr_id)
+                            self.known_trade_list.append(str(tr_id))
                             if tr_time < start_t:
                                 continue
                             
@@ -507,6 +635,28 @@ class MarketMakerStrategy:
                         self.stats["progress_pct"] = round((self.stats["total_volume_usdt"] / self.stats["target_volume_usdt"]) * 100, 4)
                         if self.stats["total_trades"] > 0:
                             self.stats["maker_ratio"] = round((self.stats["maker_trades"] / self.stats["total_trades"]) * 100, 1)
+                        self._save_state(force=True)
+
+                # 4. 统计资金费净收支（多空两条腿分别计提，精确代数求和）
+                if isinstance(funding_res, list):
+                    start_t = self.stats.get("start_timestamp") or 0
+                    net_funding_change = 0.0
+                    for fr in funding_res:
+                        fid = str(fr.get("id") or f"{fr.get('time')}:{fr.get('change')}")
+                        fr_time = float(fr.get("time", 0))
+                        # 严格过滤策略启动前的历史资金费流水，避免被历史数据污染
+                        if start_t > 0 and fr_time < start_t:
+                            continue
+                        if fid not in self.known_funding_ids:
+                            self.known_funding_ids.add(fid)
+                            self.known_funding_list.append(fid)
+                            # change < 0 为扣款(成本)，change > 0 为收款(盈利)
+                            change = float(fr.get("change", 0.0))
+                            # funding_fee_usdt 统计累计净支付资金费 (-change)
+                            net_funding_change += (-change)
+                    if net_funding_change != 0.0:
+                        self.stats["funding_fee_usdt"] = round(self.stats["funding_fee_usdt"] + net_funding_change, 4)
+                        self._save_state(force=True)
 
                 # 实时计算真实账户净盈亏
                 curr_eq = self.account_data["total_usdt"]
@@ -515,18 +665,22 @@ class MarketMakerStrategy:
                 self.stats["net_pnl_usdt"] = round(real_diff + self.stats["rebate_usdt"], 4)
                 self.stats["gross_profit_usdt"] = round(real_diff + self.stats["nominal_fees_usdt"], 4)
                 
+                # 定期节流持久化
+                self._save_state(force=False)
+
             except Exception as e:
                 logger.error(f"Account sync error: {e}")
                 
             await asyncio.sleep(1.0)
 
-    def _find_unique_long_price(self, start_p: float, tick_size: float) -> float:
+    def _find_unique_long_price(self, start_p: float, tick_size: float) -> Optional[float]:
         """确保开多价位不与当前持有的多头各开仓价位重叠，严格一个价位开一次仓"""
         p = round(start_p, 2)
         long_size = self.account_data.get("long_size", 0)
         long_entry = self.account_data.get("long_entry_price", 0.0)
-        
-        for _ in range(15):
+        max_steps = max(5, self.config.get("target_spread_ticks", 2) * 4)
+
+        for _ in range(max_steps):
             conflict = False
             for held_p in self.active_long_prices:
                 if abs(held_p - p) < tick_size * 0.6:
@@ -537,15 +691,16 @@ class MarketMakerStrategy:
             if not conflict:
                 return p
             p = round(p - tick_size, 2)
-        return p
+        return None  # 找不到合理价位则放弃本轮开多挂单，避免挂到远离盘口的孤儿价位
 
-    def _find_unique_short_price(self, start_p: float, tick_size: float) -> float:
+    def _find_unique_short_price(self, start_p: float, tick_size: float) -> Optional[float]:
         """确保开空价位不与当前持有的空头各开仓价位重叠，严格一个价位开一次仓"""
         p = round(start_p, 2)
         short_size = self.account_data.get("short_size", 0)
         short_entry = self.account_data.get("short_entry_price", 0.0)
-        
-        for _ in range(15):
+        max_steps = max(5, self.config.get("target_spread_ticks", 2) * 4)
+
+        for _ in range(max_steps):
             conflict = False
             for held_p in self.active_short_prices:
                 if abs(held_p - p) < tick_size * 0.6:
@@ -556,7 +711,7 @@ class MarketMakerStrategy:
             if not conflict:
                 return p
             p = round(p + tick_size, 2)
-        return p
+        return None
 
     # ==================== 3. 核心双向分档做市与挂单引擎 ====================
     async def _manage_dual_orders(self):
@@ -665,9 +820,34 @@ class MarketMakerStrategy:
             if best_bid <= 0:
                 return
 
-        # 3. 核心做市基准定价
+        # 3. 核心做市基准定价与量化模型驱动
+        now_t = time.time()
+        
+        # 3.1 自适应波动率价差 (Dynamic Spread Engine)
+        effective_ticks = target_ticks
+        if self.config.get("enable_dynamic_spread", True) and len(self.recent_mid_prices) >= 10:
+            prices = [p for t, p in self.recent_mid_prices if (now_t - t) <= 15.0]
+            if len(prices) >= 5:
+                p_range = max(prices) - min(prices)
+                if p_range > 3 * tick_size:
+                    vol_extra = min(int(round(p_range / tick_size)) - 2, 4)
+                    effective_ticks = min(self.config.get("max_spread_ticks", 6), target_ticks + vol_extra)
+
+        # 3.2 Avellaneda-Stoikov (AS) 动态库存偏斜 (Inventory Skewing)
+        net_pos = long_size - short_size
+        skew_offset = 0.0
+        skew_ticks = 0.0
+        if self.config.get("enable_inventory_skew", True):
+            skew_step = self.config.get("inventory_skew_ticks_per_contract", 0.1)
+            # 净多头 q > 0 时，skew_ticks > 0，买单下沉避险，卖单逼近盘口加速出货
+            # 净空头 q < 0 时，skew_ticks < 0，卖单抬高避险，买单逼近盘口补空
+            skew_ticks = max(-4.0, min(4.0, float(net_pos) * skew_step))
+            skew_offset = round(skew_ticks * tick_size, 2)
+        self.market_data["as_skew_ticks"] = round(skew_ticks, 2)
+
+        # 3.3 基础双向锚点价位
         bbo_bid = best_bid
-        bbo_ask = max(best_ask, round(bbo_bid + target_ticks * tick_size, 2))
+        bbo_ask = max(best_ask, round(bbo_bid + effective_ticks * tick_size, 2))
         bbo_bid = min(bbo_bid, round(bbo_ask - tick_size, 2))
 
         # 4. 统计在途开仓挂单，严格防止超额累计开仓
@@ -681,7 +861,6 @@ class MarketMakerStrategy:
                          ((short_size - long_size + base_size) <= net_max)
 
         # 5. 超时再平衡 / 库存倾斜判定
-        now_t = time.time()
         long_rebalance = (now_t - self.last_long_trade_time > timeout_sec) or (long_size >= max_inv)
         short_rebalance = (now_t - self.last_short_trade_time > timeout_sec) or (short_size >= max_inv)
 
@@ -689,21 +868,28 @@ class MarketMakerStrategy:
 
         # ==================== 卖方通道 (Asks) ====================
         if short_size == 0 and can_open_short:
-            # 空头缺失：卖一开空补齐底仓
-            open_short_p = self._find_unique_short_price(bbo_ask, tick_size)
-            desired_orders["t-mm-openshort"] = {
-                "size": -base_size,
-                "price": open_short_p,
-                "reduce_only": False,
-                "label": "开空做市 (卖一·补齐双仓)"
-            }
+            # 空头缺失：卖一开空补齐底仓 (结合AS偏斜计算起始价)
+            start_ask = round(bbo_ask - skew_offset, 2) if skew_offset < 0 else bbo_ask
+            open_short_p = self._find_unique_short_price(start_ask, tick_size)
+            if open_short_p is not None:
+                desired_orders["t-mm-openshort"] = {
+                    "size": -base_size,
+                    "price": open_short_p,
+                    "reduce_only": False,
+                    "label": "开空做市 (卖一·补齐双仓)"
+                }
             if long_size > 0:
                 close_qty = min(base_size, long_size)
+                anchor = round(open_short_p + tick_size, 2) if open_short_p is not None else bbo_ask
                 if long_rebalance:
-                    close_long_p = max(round(open_short_p + tick_size, 2), bbo_ask)
+                    close_long_p = max(anchor, bbo_ask)
                 else:
                     min_p = round(long_entry + tick_size, 2) if long_entry > 0 else round(bbo_ask + tick_size, 2)
-                    close_long_p = max(round(open_short_p + tick_size, 2), min_p)
+                    target_p = max(anchor, min_p)
+                    # AS偏斜：持过多多头时，平多单主动逼近买方加速出货
+                    if skew_offset > 0:
+                        target_p = max(min_p, round(target_p - skew_offset, 2))
+                    close_long_p = max(target_p, bbo_ask)
                 desired_orders["t-mm-closelong"] = {
                     "size": -close_qty,
                     "price": close_long_p,
@@ -715,10 +901,13 @@ class MarketMakerStrategy:
             close_long_p = 0.0
             if long_size > 0:
                 close_qty = min(base_size, long_size)
+                min_p = max(bbo_ask, round(long_entry + tick_size, 2)) if long_entry > 0 else bbo_ask
                 if long_rebalance:
                     close_long_p = bbo_ask
                 else:
-                    close_long_p = max(bbo_ask, round(long_entry + tick_size, 2)) if long_entry > 0 else bbo_ask
+                    # AS 偏斜：多头偏重时贴合盘口出货
+                    close_long_p = round(bbo_ask - skew_offset, 2) if skew_offset > 0 else bbo_ask
+                    close_long_p = max(close_long_p, min_p)
                 desired_orders["t-mm-closelong"] = {
                     "size": -close_qty,
                     "price": close_long_p,
@@ -729,33 +918,43 @@ class MarketMakerStrategy:
 
             if can_open_short:
                 start_p = round(close_long_p + tick_size, 2) if has_close_long else bbo_ask
+                if skew_offset < 0:
+                    start_p = round(start_p - skew_offset, 2)  # 空头过多时抬高开空价
                 open_short_p = self._find_unique_short_price(start_p, tick_size)
-                if has_close_long and open_short_p <= close_long_p:
-                    open_short_p = round(close_long_p + tick_size, 2)
-                desired_orders["t-mm-openshort"] = {
-                    "size": -base_size,
-                    "price": open_short_p,
-                    "reduce_only": False,
-                    "label": f"开空做市 ({'卖二' if has_close_long else '卖一'})"
-                }
+                if open_short_p is not None:
+                    if has_close_long and open_short_p <= close_long_p:
+                        open_short_p = round(close_long_p + tick_size, 2)
+                    desired_orders["t-mm-openshort"] = {
+                        "size": -base_size,
+                        "price": open_short_p,
+                        "reduce_only": False,
+                        "label": f"开空做市 ({'卖二' if has_close_long else '卖一'})"
+                    }
 
         # ==================== 买方通道 (Bids) ====================
         if long_size == 0 and can_open_long:
             # 多头缺失：买一开多补齐底仓
-            open_long_p = self._find_unique_long_price(bbo_bid, tick_size)
-            desired_orders["t-mm-openlong"] = {
-                "size": base_size,
-                "price": open_long_p,
-                "reduce_only": False,
-                "label": "开多做市 (买一·补齐双仓)"
-            }
+            start_bid = round(bbo_bid - skew_offset, 2) if skew_offset > 0 else bbo_bid
+            open_long_p = self._find_unique_long_price(start_bid, tick_size)
+            if open_long_p is not None:
+                desired_orders["t-mm-openlong"] = {
+                    "size": base_size,
+                    "price": open_long_p,
+                    "reduce_only": False,
+                    "label": "开多做市 (买一·补齐双仓)"
+                }
             if short_size > 0:
                 close_qty = min(base_size, short_size)
+                anchor = round(open_long_p - tick_size, 2) if open_long_p is not None else bbo_bid
                 if short_rebalance:
-                    close_short_p = min(round(open_long_p - tick_size, 2), bbo_bid)
+                    close_short_p = min(anchor, bbo_bid)
                 else:
                     max_p = round(short_entry - tick_size, 2) if short_entry > 0 else round(bbo_bid - tick_size, 2)
-                    close_short_p = min(round(open_long_p - tick_size, 2), max_p)
+                    target_p = min(anchor, max_p)
+                    # AS偏斜：空头偏重时，平空单更主动买回补平
+                    if skew_offset < 0:
+                        target_p = min(max_p, round(target_p - skew_offset, 2))
+                    close_short_p = min(target_p, bbo_bid)
                 desired_orders["t-mm-closeshort"] = {
                     "size": close_qty,
                     "price": close_short_p,
@@ -767,10 +966,12 @@ class MarketMakerStrategy:
             close_short_p = 0.0
             if short_size > 0:
                 close_qty = min(base_size, short_size)
+                max_p = min(bbo_bid, round(short_entry - tick_size, 2)) if short_entry > 0 else bbo_bid
                 if short_rebalance:
                     close_short_p = bbo_bid
                 else:
-                    close_short_p = min(bbo_bid, round(short_entry - tick_size, 2)) if short_entry > 0 else bbo_bid
+                    close_short_p = round(bbo_bid - skew_offset, 2) if skew_offset < 0 else bbo_bid
+                    close_short_p = min(close_short_p, max_p)
                 desired_orders["t-mm-closeshort"] = {
                     "size": close_qty,
                     "price": close_short_p,
@@ -781,15 +982,18 @@ class MarketMakerStrategy:
 
             if can_open_long:
                 start_p = round(close_short_p - tick_size, 2) if has_close_short else round(bbo_bid - tick_size, 2)
+                if skew_offset > 0:
+                    start_p = round(start_p - skew_offset, 2)  # 多头过多时压低开多价，减少接多
                 open_long_p = self._find_unique_long_price(start_p, tick_size)
-                if has_close_short and open_long_p >= close_short_p:
-                    open_long_p = round(close_short_p - tick_size, 2)
-                desired_orders["t-mm-openlong"] = {
-                    "size": base_size,
-                    "price": open_long_p,
-                    "reduce_only": False,
-                    "label": "开多做市 (买二)"
-                }
+                if open_long_p is not None:
+                    if has_close_short and open_long_p >= close_short_p:
+                        open_long_p = round(close_short_p - tick_size, 2)
+                    desired_orders["t-mm-openlong"] = {
+                        "size": base_size,
+                        "price": open_long_p,
+                        "reduce_only": False,
+                        "label": "开多做市 (买二)"
+                    }
 
         # 6. Maker Post-Only 价格硬性边界保护锁 (彻底消除 ORDER_POC_IMMEDIATE)
         max_maker_bid = round(best_ask - tick_size, 2)
@@ -808,7 +1012,7 @@ class MarketMakerStrategy:
                 continue
             target["price"] = p
 
-        # 7. 对账与智能增删改挂单
+        # 7. 对账与智能增删改挂单 (容差带与排队位保护)
         existing_by_text = {}
         orders_to_cancel = []
         for o in open_orders:
@@ -895,7 +1099,7 @@ class MarketMakerStrategy:
 
     # ==================== 4. 主做市巡航循环 ====================
     async def _main_loop(self):
-        self.log("INFO", "高频双向对冲 V4 做市巡航循环就绪")
+        self.log("INFO", "高频双向对冲 V4 (含 AS 动态库存偏斜与 OBI 微观定价) 做市巡航就绪")
         while self.is_running:
             try:
                 await self._manage_dual_orders()
@@ -923,5 +1127,9 @@ class MarketMakerStrategy:
                 "max_net_inventory": self.config.get("max_net_inventory", 20),
                 "rebate_rate": self.config["rebate_rate"],
                 "target_volume_usdt": self.config["target_volume_usdt"],
+                "enable_inventory_skew": self.config.get("enable_inventory_skew", True),
+                "inventory_skew_ticks_per_contract": self.config.get("inventory_skew_ticks_per_contract", 0.1),
+                "enable_micro_price": self.config.get("enable_micro_price", True),
+                "enable_dynamic_spread": self.config.get("enable_dynamic_spread", True),
             }
         }

@@ -21,6 +21,10 @@ server.pid
 .env
 .env.local
 
+# Local persisted runtime state (trades/logs)
+data/
+*.sqlite3
+
 # IDEs
 .idea/
 .vscode/

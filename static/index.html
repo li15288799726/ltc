@@ -396,16 +396,19 @@
         <div class="brand">
             <h1>GATE.IO 永续做市高频终端</h1>
             <span class="badge" id="contractLabel">LTC_USDT 永续</span>
-            <span class="badge" style="color:var(--accent-green); border-color:var(--accent-green);">双向常驻对冲 (Dual Mode)</span>
-            <span class="badge" style="color:var(--accent-yellow)">1张 = 0.1 LTC</span>
+            <span class="badge" style="color:var(--accent-green); border-color:var(--accent-green);">双向对冲 (Dual Mode)</span>
+            <span class="badge" id="asSkewBadge" style="color:#38bdf8; border-color:#0284c7;" title="Avellaneda-Stoikov 库存偏斜偏移量">AS偏斜: 0.0T</span>
+            <span class="badge" id="obiBadge" style="color:#a78bfa; border-color:#7c3aed;" title="订单簿量能失衡度 OBI">OBI: 0.00</span>
+            <span class="badge" id="microPriceBadge" style="color:#fde047; border-color:#ca8a04;" title="Stoikov 微观公允价">微观价: --</span>
         </div>
-        <div style="display:flex; align-items:center; gap: 16px;">
+        <div style="display:flex; align-items:center; gap: 12px;">
+            <input id="apiTokenInput" type="password" placeholder="🔑 API Token" style="background:#1e293b; color:#cbd5e1; border:1px solid #334155; border-radius:6px; padding:6px 10px; font-size:12px; width:110px;" title="若后端配置了 WEB_API_TOKEN 请在此输入" onchange="saveToken(this.value)">
             <div id="statusBadge" class="status-badge status-stopped">
                 <span class="pulse-dot"></span>
                 <span id="statusText">已暂停做市</span>
             </div>
             <div class="header-actions">
-                <button class="btn-start" onclick="startMM()">▶ 启动双向做市</button>
+                <button class="btn-start" onclick="startMM()">▶ 启动做市</button>
                 <button class="btn-stop" onclick="stopMM()">⏸ 暂停挂单</button>
                 <button class="btn-cancel" onclick="emergencyCancel()">🚨 紧急全撤</button>
                 <button class="btn-reset" onclick="resetStats()">🧹 重置统计</button>
@@ -484,8 +487,8 @@
             </div>
             <div class="metric-value" style="color:var(--accent-green);" id="rebateUsdt">+0.00 U</div>
             <div class="metric-foot">
-                <span>名义手续费扣减:</span>
-                <span id="nominalFees" style="color:var(--accent-red)">-0.00 U</span>
+                <span>名义手续费扣减: <span id="nominalFees" style="color:var(--accent-red)">-0.00 U</span></span>
+                <span>资金费净成本: <strong id="fundingFees" style="color:#fde047">0.00 U</strong></span>
             </div>
         </div>
 
@@ -701,17 +704,26 @@
 
         document.getElementById('rebateUsdt').innerText = '+' + stats.rebate_usdt.toFixed(2) + ' U';
         document.getElementById('nominalFees').innerText = '-' + stats.nominal_fees_usdt.toFixed(2) + ' U';
+        const fFee = stats.funding_fee_usdt || 0;
+        document.getElementById('fundingFees').innerText = (fFee >= 0 ? '+' : '') + fFee.toFixed(3) + ' U';
         document.getElementById('netPnl').innerText = (stats.net_pnl_usdt >= 0 ? '+' : '') + stats.net_pnl_usdt.toFixed(2) + ' U';
         const lTrades = stats.long_trades || 0;
         const sTrades = stats.short_trades || 0;
         document.getElementById('totalTrades').innerText = stats.total_trades + ' (多' + lTrades + ' / 空' + sTrades + ')';
 
-        const mkt = data.market_data;
+        const mkt = data.market_data || {};
         document.getElementById('bestBid').innerText = (mkt.best_bid || 0).toFixed(2);
         document.getElementById('bestAsk').innerText = (mkt.best_ask || 0).toFixed(2);
         document.getElementById('marketSpread').innerText = (mkt.spread_usdt || 0.01).toFixed(2) + ' U';
         document.getElementById('marketSpreadTicks').innerText = mkt.spread_ticks || 1;
         document.getElementById('lastRefresh').innerText = new Date().toLocaleTimeString();
+
+        // 量化模型前沿指标展示
+        const skewT = mkt.as_skew_ticks !== undefined ? mkt.as_skew_ticks : 0;
+        document.getElementById('asSkewBadge').innerText = 'AS偏斜: ' + (skewT > 0 ? '+' : '') + skewT.toFixed(1) + 'T';
+        const obiVal = mkt.obi !== undefined ? mkt.obi : 0;
+        document.getElementById('obiBadge').innerText = 'OBI: ' + (obiVal > 0 ? '+' : '') + obiVal.toFixed(2);
+        document.getElementById('microPriceBadge').innerText = '微观价: ' + (mkt.micro_price ? mkt.micro_price.toFixed(2) : '--');
 
         const quotes = data.active_quotes || {};
 
@@ -794,26 +806,52 @@
         }
     }
 
+    function getToken() {
+        return localStorage.getItem('mm_web_api_token') || '';
+    }
+
+    function saveToken(val) {
+        localStorage.setItem('mm_web_api_token', (val || '').trim());
+    }
+
+    async function authFetch(url, options = {}) {
+        options.headers = options.headers || {};
+        const token = getToken();
+        if (token) {
+            options.headers['X-API-Token'] = token;
+        }
+        try {
+            const res = await fetch(url, options);
+            if (res.status === 401) {
+                alert('⚠️ 鉴权失败 (401 Unauthorized)：\n请在页面右上角输入正确的 WEB_API_TOKEN！');
+            }
+            return res;
+        } catch (err) {
+            console.error('Fetch error:', err);
+            throw err;
+        }
+    }
+
     async function startMM() {
-        await fetch('/api/start', { method: 'POST' });
+        await authFetch('/api/start', { method: 'POST' });
         fetchStatus();
     }
 
     async function stopMM() {
-        await fetch('/api/stop', { method: 'POST' });
+        await authFetch('/api/stop', { method: 'POST' });
         fetchStatus();
     }
 
     async function emergencyCancel() {
         if (confirm('确定要紧急撤销 LTC_USDT 全部挂单吗？')) {
-            await fetch('/api/emergency_cancel', { method: 'POST' });
+            await authFetch('/api/emergency_cancel', { method: 'POST' });
             fetchStatus();
         }
     }
 
     async function resetStats() {
         if (confirm('确定要重置本次测试的累计流水与统计数据吗？')) {
-            await fetch('/api/reset_stats', { method: 'POST' });
+            await authFetch('/api/reset_stats', { method: 'POST' });
             fetchStatus();
         }
     }
@@ -823,7 +861,7 @@
         const spreadTicks = parseInt(document.getElementById('inputSpreadTicks').value) || 2;
         const maxInv = parseInt(document.getElementById('inputMaxInv').value) || 30;
         const maxNet = parseInt(document.getElementById('inputMaxNet').value) || 20;
-        await fetch('/api/update_params', {
+        await authFetch('/api/update_params', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -835,6 +873,12 @@
         });
         alert('参数已成功更新并在下一轮做市中生效！');
         fetchStatus();
+    }
+
+    // 初始化已保存的 Token
+    const savedTok = getToken();
+    if (savedTok && document.getElementById('apiTokenInput')) {
+        document.getElementById('apiTokenInput').value = savedTok;
     }
 
     setInterval(fetchStatus, 800);

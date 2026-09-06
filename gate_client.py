@@ -146,6 +146,35 @@ class GateFuturesClient:
             return res
         return []
 
+    # --- 资金费流水 ---
+    async def get_funding_history(self, contract: str = "LTC_USDT", limit: int = 50) -> List[Dict[str, Any]]:
+        """查询账户账单中 type=fund（资金费结算）的记录"""
+        path = f"/api/v4/futures/{self.settle}/account_book"
+        query = f"contract={contract}&limit={limit}&type=fund"
+        res = await self.request("GET", path, query=query)
+        if isinstance(res, list):
+            return res
+        return []
+
+    # --- 杠杆与保证金设置 (支持全仓/逐仓与双向持仓) ---
+    async def set_leverage(self, contract: str, leverage: int, is_cross: bool = True) -> Dict[str, Any]:
+        """
+        显式设置合约杠杆倍数。
+        全仓模式下 Gate.io 要求传 leverage=0 并指定 cross_leverage_limit。
+        双向持仓路由为 dual_comp/positions。
+        """
+        path = f"/api/v4/futures/{self.settle}/dual_comp/positions/{contract}/leverage"
+        if is_cross:
+            query = f"leverage=0&cross_leverage_limit={leverage}"
+        else:
+            query = f"leverage={leverage}"
+        res = await self.request("POST", path, query=query)
+        # 如果 dual_comp 接口异常，尝试单向标准接口作为 fallback
+        if isinstance(res, dict) and res.get("error"):
+            single_path = f"/api/v4/futures/{self.settle}/positions/{contract}/leverage"
+            res = await self.request("POST", single_path, query=query)
+        return res
+
     async def close(self):
         if self.session and not self.session.closed:
             await self.session.close()
